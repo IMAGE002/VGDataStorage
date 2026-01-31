@@ -1,15 +1,10 @@
 // ============================================
 // PRIZE STORE SERVICE
 // ============================================
-// A small Express API that owns the PostgreSQL
-// connection. Both your webapp (via the bot
-// server) and your gift transactor talk to
-// this single service to read/write prizes.
-//
-// Deploy this as its OWN Railway service.
-// Set its DATABASE_URL env var to the
-// connection string from your Railway
-// PostgreSQL addon.
+// Deploy as its own Railway service.
+// Link your PostgreSQL addon to it —
+// the DATABASE_URL variable will be set
+// automatically via ${{ Postgres.DATABASE_URL }}
 // ============================================
 
 const express = require('express');
@@ -21,19 +16,52 @@ app.use(express.json());
 // ============================================
 // DATABASE CONNECTION
 // ============================================
-// Railway gives you DATABASE_URL automatically
-// when you link the PostgreSQL addon to this
-// service. It looks like:
-//   postgres://user:pass@host:port/dbname
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL
 });
 
-// Log connection status on startup
 pool.on('error', (err) => {
   console.error('❌ PostgreSQL pool error:', err.message);
 });
+
+// ============================================
+// AUTO-CREATE TABLE ON STARTUP
+// ============================================
+// This runs once when the service starts.
+// IF NOT EXISTS means it's safe to run every
+// single time — it does nothing if the table
+// already exists.
+// ============================================
+
+async function initDatabase() {
+  const createTable = `
+    CREATE TABLE IF NOT EXISTS prizes (
+      prize_id        TEXT        PRIMARY KEY,
+      gift_name       TEXT        NOT NULL,
+      user_id         BIGINT      NOT NULL,
+      username        TEXT,
+      status          TEXT        NOT NULL DEFAULT 'pending',
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      error_message   TEXT
+    );
+  `;
+
+  const createIndexUser = `
+    CREATE INDEX IF NOT EXISTS idx_prizes_user_id ON prizes (user_id);
+  `;
+
+  const createIndexStatus = `
+    CREATE INDEX IF NOT EXISTS idx_prizes_status ON prizes (status);
+  `;
+
+  await pool.query(createTable);
+  await pool.query(createIndexUser);
+  await pool.query(createIndexStatus);
+
+  console.log('✅ Database table ready');
+}
 
 // ============================================
 // HEALTH CHECK
@@ -55,12 +83,8 @@ app.get('/', async (req, res) => {
 // ============================================
 // POST /prizes
 // ============================================
-// Called by: your bot server, right after a
-//           spin wheel win (gift type only).
-//
+// Called by: webapp, right after a gift is won.
 // Body: { prize_id, gift_name, user_id, username }
-//
-// Creates a new prize row with status = pending
 // ============================================
 
 app.post('/prizes', async (req, res) => {
@@ -81,8 +105,8 @@ app.post('/prizes', async (req, res) => {
     );
 
     console.log(`✅ Prize stored: ${prize_id} | ${gift_name} | user ${user_id}`);
-
     res.status(201).json({ success: true, prize_id });
+
   } catch (err) {
     console.error('❌ POST /prizes error:', err.message);
     res.status(500).json({ error: err.message });
@@ -92,11 +116,8 @@ app.post('/prizes', async (req, res) => {
 // ============================================
 // GET /prizes/:prize_id
 // ============================================
-// Called by: your gift transactor, to verify
-//           a prize exists and belongs to the
-//           right user before sending the gift.
-//
-// Returns the full prize row.
+// Called by: gift transactor, to verify a prize
+//           exists before sending the gift.
 // ============================================
 
 app.get('/prizes/:prize_id', async (req, res) => {
@@ -111,6 +132,7 @@ app.get('/prizes/:prize_id', async (req, res) => {
     }
 
     res.json(result.rows[0]);
+
   } catch (err) {
     console.error('❌ GET /prizes/:id error:', err.message);
     res.status(500).json({ error: err.message });
@@ -120,9 +142,7 @@ app.get('/prizes/:prize_id', async (req, res) => {
 // ============================================
 // GET /prizes?user_id=123
 // ============================================
-// Called by: webapp, to show a user's inventory.
-//
-// Returns all prizes for that user.
+// Called by: webapp, to load a user's inventory.
 // ============================================
 
 app.get('/prizes', async (req, res) => {
@@ -136,7 +156,6 @@ app.get('/prizes', async (req, res) => {
     let query = 'SELECT * FROM prizes WHERE user_id = $1';
     const params = [user_id];
 
-    // Optional: filter by status (pending, claiming, claimed, failed)
     if (status) {
       query += ' AND status = $2';
       params.push(status);
@@ -146,6 +165,7 @@ app.get('/prizes', async (req, res) => {
 
     const result = await pool.query(query, params);
     res.json(result.rows);
+
   } catch (err) {
     console.error('❌ GET /prizes error:', err.message);
     res.status(500).json({ error: err.message });
@@ -155,16 +175,8 @@ app.get('/prizes', async (req, res) => {
 // ============================================
 // PATCH /prizes/:prize_id
 // ============================================
-// Called by: your gift transactor, to update
-//           the status after it attempts to
-//           send the gift.
-//
+// Called by: gift transactor, to update status.
 // Body: { status, error_message (optional) }
-//
-// Valid status transitions:
-//   pending  → claiming   (transactor picked it up)
-//   claiming → claimed    (transactor confirms success)
-//   claiming → failed     (transactor reports failure)
 // ============================================
 
 app.patch('/prizes/:prize_id', async (req, res) => {
@@ -199,6 +211,7 @@ app.patch('/prizes/:prize_id', async (req, res) => {
 
     console.log(`📊 Prize ${prize_id} status → ${status}`);
     res.json(result.rows[0]);
+
   } catch (err) {
     console.error('❌ PATCH /prizes/:id error:', err.message);
     res.status(500).json({ error: err.message });
@@ -208,9 +221,8 @@ app.patch('/prizes/:prize_id', async (req, res) => {
 // ============================================
 // DELETE /prizes/:prize_id
 // ============================================
-// Called by: your gift transactor, ONLY after
-//           status is "claimed". Cleans up the
-//           row so it doesn't grow forever.
+// Called by: gift transactor, ONLY after the
+//           prize status is "claimed".
 // ============================================
 
 app.delete('/prizes/:prize_id', async (req, res) => {
@@ -228,6 +240,7 @@ app.delete('/prizes/:prize_id', async (req, res) => {
 
     console.log(`🗑️  Prize deleted: ${req.params.prize_id}`);
     res.json({ success: true, deleted: result.rows[0] });
+
   } catch (err) {
     console.error('❌ DELETE /prizes/:id error:', err.message);
     res.status(500).json({ error: err.message });
@@ -241,13 +254,12 @@ app.delete('/prizes/:prize_id', async (req, res) => {
 const PORT = process.env.PORT || 3002;
 
 async function start() {
-  // Test the connection
   try {
-    const result = await pool.query('SELECT 1');
-    console.log('✅ PostgreSQL connected');
+    await initDatabase();
+    console.log('✅ PostgreSQL connected and ready');
   } catch (err) {
     console.error('❌ Cannot connect to PostgreSQL:', err.message);
-    console.error('   Make sure DATABASE_URL is set and the addon is linked.');
+    console.error('   Make sure DATABASE_URL is set.');
     process.exit(1);
   }
 
