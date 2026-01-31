@@ -1,5 +1,5 @@
 // ============================================
-// PRIZE STORE SERVICE
+// PRIZE STORE SERVICE - WITH CORS ENABLED
 // ============================================
 // Deploy as its own Railway service.
 // Link your PostgreSQL addon to it —
@@ -8,9 +8,20 @@
 // ============================================
 
 const express = require('express');
+const cors = require('cors'); // ← ADDED: CORS module
 const { Pool } = require('pg');
 
 const app = express();
+
+// ============================================
+// MIDDLEWARE - CORS ENABLED!
+// ============================================
+// This allows your web app (from any domain) to
+// send requests to this Prize Store API.
+// Without this, browsers will block the requests!
+// ============================================
+
+app.use(cors()); // ← ENABLE CORS FOR ALL ROUTES
 app.use(express.json());
 
 // ============================================
@@ -27,11 +38,6 @@ pool.on('error', (err) => {
 
 // ============================================
 // AUTO-CREATE TABLE ON STARTUP
-// ============================================
-// This runs once when the service starts.
-// IF NOT EXISTS means it's safe to run every
-// single time — it does nothing if the table
-// already exists.
 // ============================================
 
 async function initDatabase() {
@@ -90,22 +96,44 @@ app.get('/', async (req, res) => {
 app.post('/prizes', async (req, res) => {
   const { prize_id, gift_name, user_id, username } = req.body;
 
+  console.log('\n📝 Prize registration request:');
+  console.log('   Prize ID:', prize_id);
+  console.log('   Gift:', gift_name);
+  console.log('   User ID:', user_id);
+  console.log('   Username:', username);
+
   if (!prize_id || !gift_name || !user_id) {
+    console.log('❌ Missing required fields');
     return res.status(400).json({
       error: 'Missing required fields: prize_id, gift_name, user_id'
     });
   }
 
   try {
-    await pool.query(
+    const result = await pool.query(
       `INSERT INTO prizes (prize_id, gift_name, user_id, username, status)
        VALUES ($1, $2, $3, $4, 'pending')
-       ON CONFLICT (prize_id) DO NOTHING`,
+       ON CONFLICT (prize_id) DO NOTHING
+       RETURNING *`,
       [prize_id, gift_name, user_id, username || null]
     );
 
-    console.log(`✅ Prize stored: ${prize_id} | ${gift_name} | user ${user_id}`);
-    res.status(201).json({ success: true, prize_id });
+    if (result.rows.length > 0) {
+      console.log(`✅ Prize stored successfully!`);
+      res.status(201).json({ 
+        success: true, 
+        prize_id,
+        message: 'Prize registered successfully',
+        prize: result.rows[0]
+      });
+    } else {
+      console.log('⚠️ Prize already exists (duplicate)');
+      res.status(200).json({ 
+        success: true, 
+        prize_id,
+        message: 'Prize already registered' 
+      });
+    }
 
   } catch (err) {
     console.error('❌ POST /prizes error:', err.message);
@@ -128,9 +156,11 @@ app.get('/prizes/:prize_id', async (req, res) => {
     );
 
     if (result.rows.length === 0) {
+      console.log(`❌ Prize not found: ${req.params.prize_id}`);
       return res.status(404).json({ error: 'Prize not found' });
     }
 
+    console.log(`✅ Prize found: ${req.params.prize_id}`);
     res.json(result.rows[0]);
 
   } catch (err) {
@@ -164,6 +194,7 @@ app.get('/prizes', async (req, res) => {
     query += ' ORDER BY created_at DESC';
 
     const result = await pool.query(query, params);
+    console.log(`📊 Found ${result.rows.length} prizes for user ${user_id}`);
     res.json(result.rows);
 
   } catch (err) {
@@ -266,9 +297,10 @@ async function start() {
   app.listen(PORT, () => {
     console.log('');
     console.log('═══════════════════════════════════════════');
-    console.log('🗄️  PRIZE STORE SERVICE');
+    console.log('🗄️  PRIZE STORE SERVICE (WITH CORS)');
     console.log('═══════════════════════════════════════════');
     console.log(`🌐 Running on port ${PORT}`);
+    console.log('✅ CORS enabled for all origins');
     console.log('');
     console.log('📡 Endpoints:');
     console.log('   POST   /prizes          → store a new prize');
